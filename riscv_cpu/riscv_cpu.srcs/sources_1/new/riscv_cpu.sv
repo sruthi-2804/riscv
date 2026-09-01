@@ -72,7 +72,7 @@ logic [31:0] alu_operand_b;
 logic [31:0] alu_result;
 logic zero;
 
-// MEM/WB pipeline register signals (declared here so the WB mux above can use them)
+// MEM/WB pipeline register signals (declared here so the WB mux and regfile ports below can use them)
 logic [31:0] mem_wb_mem_read_data;
 logic [31:0] mem_wb_alu_result;
 logic [4:0]  mem_wb_rd;
@@ -110,14 +110,6 @@ program_counter pc_inst (
     .next_pc(next_pc),
     .pc(pc_value)
 );
-always_comb begin
-    if (jump)
-        next_pc = jump_target;
-    else if (branch_taken)
-        next_pc = branch_target;
-    else
-        next_pc = pc_plus_4;
-end
 
     // Instruction Memory
     instruction_memory imem_inst (
@@ -240,6 +232,8 @@ logic        ex_mem_jump;
 
 assign ex_branch_target = id_ex_pc + id_ex_immediate;
 
+
+
  // Decoder / Control Unit
     control_unit control_inst (
    .opcode(if_id_instruction[6:0]),
@@ -263,11 +257,9 @@ register_file regfile_inst (
 
     .read_addr_1(rs1),
     .read_addr_2(rs2),
-
-    .write_addr(rd),
-    .write_data(write_data),
-    .write_enable(reg_write),
-
+    .write_addr(mem_wb_rd),
+.write_data(write_data),
+.write_enable(mem_wb_reg_write),
     .read_data_1(read_data_1),
     .read_data_2(read_data_2)
 );
@@ -287,7 +279,7 @@ alu alu_inst (
     .alu_control (id_ex_alu_control),
     .result      (alu_result)
 );
-
+//data memory
 data_memory dmem_inst (
     .clk(clk),
     .reset(reset),
@@ -308,6 +300,8 @@ branch_unit branch_inst (
     .operand_b(id_ex_rs2_data),
     .branch_taken(ex_branch_taken)
 );
+
+//EX/MEM
 always_ff @(posedge clk or posedge reset) begin
     if (reset) begin
         ex_mem_alu_result <= 32'b0;
@@ -318,7 +312,7 @@ always_ff @(posedge clk or posedge reset) begin
         ex_mem_mem_read   <= 1'b0; //read Data Memory
         ex_mem_mem_write  <= 1'b0; //write Data Memory
         ex_mem_mem_to_reg <= 1'b0; //choose memory vs ALU data for Register File write
-        ex_mem_jump<= 1'b0; 
+        ex_mem_jump <= 1'b0; 
     end
     else begin
         ex_mem_alu_result <= alu_result;
