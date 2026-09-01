@@ -110,6 +110,14 @@ program_counter pc_inst (
     .next_pc(next_pc),
     .pc(pc_value)
 );
+always_comb begin
+    if (jump)
+        next_pc = jump_target;
+    else if (branch_taken)
+        next_pc = branch_target;
+    else
+        next_pc = pc_plus_4;
+end
 
     // Instruction Memory
     instruction_memory imem_inst (
