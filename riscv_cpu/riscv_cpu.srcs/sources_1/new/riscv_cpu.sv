@@ -72,6 +72,14 @@ logic [31:0] alu_operand_b;
 logic [31:0] alu_result;
 logic zero;
 
+// MEM/WB pipeline register signals (declared here so the WB mux above can use them)
+logic [31:0] mem_wb_mem_read_data;
+logic [31:0] mem_wb_alu_result;
+logic [4:0]  mem_wb_rd;
+
+logic        mem_wb_reg_write;
+logic        mem_wb_mem_to_reg;
+
 //pc 3 way mux
 assign pc_plus_4 = pc_value + 32'd4;
 
@@ -309,7 +317,7 @@ always_ff @(posedge clk or posedge reset) begin
         ex_mem_reg_write  <= 1'b0; //write Register File
         ex_mem_mem_read   <= 1'b0; //read Data Memory
         ex_mem_mem_write  <= 1'b0; //write Data Memory
-        ex_mem_mem_to_reg <= 1'b0 //choose memory vs ALU data for Register File write
+        ex_mem_mem_to_reg <= 1'b0; //choose memory vs ALU data for Register File write
         ex_mem_jump<= 1'b0; 
     end
     else begin
@@ -325,14 +333,7 @@ always_ff @(posedge clk or posedge reset) begin
         ex_mem_jump       <= id_ex_jal;
     end
 end
-// MEM/WB pipeline register
-logic [31:0] mem_wb_mem_read_data;
-logic [31:0] mem_wb_alu_result;
-logic [4:0]  mem_wb_rd;
-
-logic        mem_wb_reg_write;
-logic        mem_wb_mem_to_reg;
-
+// MEM/WB pipeline register (signals declared near the top with the WB mux)
 always_ff @(posedge clk or posedge reset) begin
     if (reset) begin
         mem_wb_mem_read_data <= 32'b0;
