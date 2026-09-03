@@ -24,6 +24,12 @@ module riscv_cpu (
     input logic reset
 );
 
+// valid bits
+logic if_id_valid;
+logic id_ex_valid;
+logic ex_mem_valid;
+logic mem_wb_valid;
+
     // ============================================================
     // IF STAGE SIGNALS
     // ============================================================
@@ -208,11 +214,13 @@ module riscv_cpu (
     always_ff @(posedge clk or posedge reset) begin
 
         if (reset) begin
+            if_id_valid <= 1'b0;
             if_id_pc          <= 32'b0;
             if_id_instruction <= 32'b0;
         end
 
         else begin
+            if_id_valid <= 1'b1;
             if_id_pc          <= pc_value;
             if_id_instruction <= instruction;
         end
@@ -252,7 +260,9 @@ module riscv_cpu (
         .alu_control (alu_control)
     );
 
-
+    logic regfile_write_enable;
+    assign regfile_write_enable = mem_wb_valid && mem_wb_reg_write;
+    
     register_file regfile_inst (
         .clk          (clk),
         .reset        (reset),
@@ -264,7 +274,7 @@ module riscv_cpu (
         // WB-stage write port
         .write_addr   (mem_wb_rd),
         .write_data   (write_data),
-        .write_enable (mem_wb_reg_write),
+        .write_enable (regfile_write_enable),
 
         .read_data_1  (read_data_1),
         .read_data_2  (read_data_2)
@@ -287,7 +297,7 @@ module riscv_cpu (
         if (reset) begin
 
             id_ex_pc          <= 32'b0;
-
+            id_ex_valid <= 1'b0;
             id_ex_rs1         <= 5'b0;
             id_ex_rs2         <= 5'b0;
             id_ex_rd          <= 5'b0;
@@ -313,7 +323,7 @@ module riscv_cpu (
         else begin
 
             id_ex_pc          <= if_id_pc;
-
+            id_ex_valid <= 1'b1;
             id_ex_rs1         <= rs1;
             id_ex_rs2         <= rs2;
             id_ex_rd          <= rd;
@@ -387,7 +397,7 @@ module riscv_cpu (
     always_ff @(posedge clk or posedge reset) begin
 
         if (reset) begin
-
+            ex_mem_valid <= 1'b0;
             ex_mem_alu_result <= 32'b0;
             ex_mem_rs2_data   <= 32'b0;
             ex_mem_pc_plus_4  <= 32'b0;
@@ -402,7 +412,7 @@ module riscv_cpu (
         end
 
         else begin
-
+            ex_mem_valid <= 1'b1;
             ex_mem_alu_result <= alu_result;
             ex_mem_rs2_data   <= id_ex_rs2_data;
             ex_mem_pc_plus_4  <= ex_pc_plus_4;
@@ -424,13 +434,14 @@ module riscv_cpu (
     // ============================================================
     // MEM STAGE
     // ============================================================
-
+    logic data_mem_write_enable;
+    assign data_mem_write_enable = ex_mem_valid && ex_mem_mem_write;
     data_memory dmem_inst (
         .clk       (clk),
         .reset     (reset),
 
         .mem_read  (ex_mem_mem_read),
-        .mem_write (ex_mem_mem_write),
+        .mem_write (data_mem_write_enable),
 
         .address   (ex_mem_alu_result),
         .write_data(ex_mem_rs2_data),
@@ -446,7 +457,7 @@ module riscv_cpu (
     always_ff @(posedge clk or posedge reset) begin
 
         if (reset) begin
-
+            mem_wb_valid <= 1'b0;
             mem_wb_mem_read_data <= 32'b0;
             mem_wb_alu_result    <= 32'b0;
             mem_wb_pc_plus_4     <= 32'b0;
@@ -459,7 +470,7 @@ module riscv_cpu (
         end
 
         else begin
-
+            mem_wb_valid <= 1'b1;
             mem_wb_mem_read_data <= mem_read_data;
             mem_wb_alu_result    <= ex_mem_alu_result;
             mem_wb_pc_plus_4     <= ex_mem_pc_plus_4;
