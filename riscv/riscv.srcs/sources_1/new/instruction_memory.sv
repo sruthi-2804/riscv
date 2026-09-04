@@ -30,8 +30,8 @@ output logic [31:0]instruction
      //test instructions
 
   initial begin
-    memory[0] = 32'h01000093;   // addi x1, x0, 16
-    memory[1] = 32'h01900113;   // addi x2, x0, 25
+    memory[0] = 32'h00500093; // addi x1, x0, 5
+    memory[1] = 32'h00108133; // add  x2, x1, x1
 
     memory[2] = 32'h00000013;   // nop
     memory[3] = 32'h00000013;   // nop

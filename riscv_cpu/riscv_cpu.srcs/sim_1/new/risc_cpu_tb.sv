@@ -44,7 +44,7 @@ module riscv_cpu_tb;
     initial begin
         clk = 1'b0;
 
-        forever #5 clk = ~clk;
+        forever #1 clk = ~clk;
     end
 
 
@@ -60,7 +60,7 @@ module riscv_cpu_tb;
         reset = 1'b0;
 
         // Enough time for instructions to cross all 5 stages
-        #150;
+        #200;
 
         $finish;
     end

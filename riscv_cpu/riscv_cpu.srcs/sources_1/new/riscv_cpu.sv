@@ -321,9 +321,8 @@ logic mem_wb_valid;
         end
 
         else begin
-
+            id_ex_valid <= if_id_valid;
             id_ex_pc          <= if_id_pc;
-            id_ex_valid <= 1'b1;
             id_ex_rs1         <= rs1;
             id_ex_rs2         <= rs2;
             id_ex_rd          <= rd;
@@ -355,13 +354,21 @@ logic mem_wb_valid;
     // EX STAGE
     // ============================================================
 
+   //00 = use normal ID/EX register value
+   //10 = take newer value from EX/MEM
+   //01 = take value from MEM/WB
+   logic [1:0] forward_a;
+   logic [1:0] forward_b;
+   logic [31:0] forwarded_rs1_data;
+   logic [31:0] forwarded_rs2_data;
+
+   
     // ALU source-B mux
-    assign alu_operand_b =
-        id_ex_alu_src ? id_ex_immediate : id_ex_rs2_data;
+    assign alu_operand_b = id_ex_alu_src ? id_ex_immediate : forwarded_rs2_data;
 
 
     alu alu_inst (
-        .operand_a   (id_ex_rs1_data),
+        .operand_a(forwarded_rs1_data),
         .operand_b   (alu_operand_b),
         .alu_control (id_ex_alu_control),
         .result      (alu_result)
@@ -389,7 +396,41 @@ logic mem_wb_valid;
     // JAL writes the address of the instruction following the JAL.
     assign ex_pc_plus_4 = id_ex_pc + 32'd4;
 
+    
+   always_comb begin
+    forward_a = 2'b00;
+    forward_b = 2'b00;
 
+    if (ex_mem_reg_write && (ex_mem_rd != 5'd0) &&(ex_mem_rd == id_ex_rs1))
+        forward_a = 2'b10;
+    else if (mem_wb_reg_write && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs1)) begin
+        forward_a = 2'b01;
+
+    end
+
+    if (ex_mem_reg_write && (ex_mem_rd != 5'd0) && (ex_mem_rd == id_ex_rs2))
+        forward_b = 2'b10;
+    else if (mem_wb_reg_write && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs2)) begin
+        forward_b = 2'b01;
+
+end
+end
+
+always_comb begin
+
+    case (forward_a)
+        2'b10:   forwarded_rs1_data = ex_mem_alu_result;
+        2'b01:   forwarded_rs1_data = write_data;
+        default: forwarded_rs1_data = id_ex_rs1_data;
+    endcase
+
+    case (forward_b)
+        2'b10:   forwarded_rs2_data = ex_mem_alu_result;
+        2'b01:   forwarded_rs2_data = write_data;
+        default: forwarded_rs2_data = id_ex_rs2_data;
+    endcase
+
+end
     // ============================================================
     // EX/MEM PIPELINE REGISTER
     // ============================================================
@@ -412,7 +453,7 @@ logic mem_wb_valid;
         end
 
         else begin
-            ex_mem_valid <= 1'b1;
+            ex_mem_valid <= id_ex_valid;
             ex_mem_alu_result <= alu_result;
             ex_mem_rs2_data   <= id_ex_rs2_data;
             ex_mem_pc_plus_4  <= ex_pc_plus_4;
@@ -470,7 +511,7 @@ logic mem_wb_valid;
         end
 
         else begin
-            mem_wb_valid <= 1'b1;
+            mem_wb_valid <= ex_mem_valid;
             mem_wb_mem_read_data <= mem_read_data;
             mem_wb_alu_result    <= ex_mem_alu_result;
             mem_wb_pc_plus_4     <= ex_mem_pc_plus_4;
