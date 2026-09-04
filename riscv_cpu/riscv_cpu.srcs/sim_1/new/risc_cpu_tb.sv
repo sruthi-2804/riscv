@@ -44,7 +44,7 @@ module riscv_cpu_tb;
     initial begin
         clk = 1'b0;
 
-        forever #1 clk = ~clk;
+        forever #5 clk = ~clk;
     end
 
 
