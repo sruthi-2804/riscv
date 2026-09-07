@@ -30,8 +30,9 @@ output logic [31:0]instruction
      //test instructions
 
   initial begin
-memory[0] = 32'h00500013; // addi x0, x0, 5
-memory[1] = 32'h00000133; // add  x2, x0, x0
+memory[0] = 32'h00002083;   // lw   x1, 0(x0)
+memory[1] = 32'h000081B3;   // add  x3, x1, x0
+memory[2] = 32'h00100213;   // addi x4, x0, 1
 end
       assign instruction = memory[address[9:2]];
 endmodule

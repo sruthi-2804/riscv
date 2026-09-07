@@ -23,6 +23,10 @@ module riscv_cpu (
     input logic clk,
     input logic reset
 );
+//hazard logic
+logic load_use_hazard;
+logic if_id_uses_rs1;
+logic if_id_uses_rs2;
 
 // valid bits
 logic if_id_valid;
@@ -195,7 +199,10 @@ logic mem_wb_valid;
 
     always_comb begin
 
-        if (id_ex_jal)
+        if (load_use_hazard)
+            next_pc = pc_value;
+        
+        else if (id_ex_jal)
             next_pc = ex_jump_target;
 
         else if (ex_branch_taken)
@@ -208,7 +215,7 @@ logic mem_wb_valid;
 
 
     // ============================================================
-    // IF/ID PIPELINE REGISTER
+    // IF/ID PIPELINE REGISTER 
     // ============================================================
 
     always_ff @(posedge clk or posedge reset) begin
@@ -219,15 +226,22 @@ logic mem_wb_valid;
             if_id_instruction <= 32'b0;
         end
 
-        else begin
-            if_id_valid <= 1'b1;
-            if_id_pc          <= pc_value;
-            if_id_instruction <= instruction;
-        end
+        else if (load_use_hazard) begin
 
-    end
+            if_id_valid <= if_id_valid;
+            if_id_pc <= if_id_pc;
+            if_id_instruction <= if_id_instruction;
+  end
 
+       else begin
 
+         if_id_valid       <= 1'b1;
+         if_id_pc          <= pc_value;
+         if_id_instruction <= instruction;
+
+ end
+
+end
     // ============================================================
     // ID STAGE
     // ============================================================
@@ -319,6 +333,32 @@ logic mem_wb_valid;
             id_ex_alu_control <= 4'b0;
 
         end
+        else if (load_use_hazard) begin
+
+    id_ex_valid       <= 1'b0;
+
+    id_ex_pc          <= 32'b0;
+    id_ex_rs1         <= 5'b0;
+    id_ex_rs2         <= 5'b0;
+    id_ex_rd          <= 5'b0;
+
+    id_ex_rs1_data    <= 32'b0;
+    id_ex_rs2_data    <= 32'b0;
+    id_ex_immediate   <= 32'b0;
+
+    id_ex_funct3      <= 3'b0;
+
+    id_ex_reg_write   <= 1'b0;
+    id_ex_alu_src     <= 1'b0;
+    id_ex_mem_read    <= 1'b0;
+    id_ex_mem_write   <= 1'b0;
+    id_ex_mem_to_reg  <= 1'b0;
+    id_ex_branch      <= 1'b0;
+    id_ex_jal         <= 1'b0;
+
+    id_ex_alu_control <= 4'b0;
+
+end
 
         else begin
             id_ex_valid <= if_id_valid;
@@ -381,8 +421,8 @@ logic mem_wb_valid;
     branch_unit branch_inst (
         .branch       (id_ex_branch),
         .funct3       (id_ex_funct3),
-        .operand_a    (id_ex_rs1_data),
-        .operand_b    (id_ex_rs2_data),
+        .operand_a (forwarded_rs1_data),
+        .operand_b (forwarded_rs2_data),
         .branch_taken (ex_branch_taken)
     );
 
@@ -401,16 +441,16 @@ logic mem_wb_valid;
     forward_a = 2'b00;
     forward_b = 2'b00;
 
-    if (ex_mem_reg_write && (ex_mem_rd != 5'd0) &&(ex_mem_rd == id_ex_rs1))
+    if (ex_mem_valid && ex_mem_reg_write && (ex_mem_rd != 5'd0) &&(ex_mem_rd == id_ex_rs1))
         forward_a = 2'b10;
-    else if (mem_wb_reg_write && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs1)) begin
+    else if (mem_wb_valid && mem_wb_reg_write && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs1)) begin
         forward_a = 2'b01;
 
     end
 
-    if (ex_mem_reg_write && (ex_mem_rd != 5'd0) && (ex_mem_rd == id_ex_rs2))
+    if (ex_mem_valid && ex_mem_reg_write && (ex_mem_rd != 5'd0) && (ex_mem_rd == id_ex_rs2))
         forward_b = 2'b10;
-    else if (mem_wb_reg_write && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs2)) begin
+    else if (mem_wb_valid && mem_wb_reg_write && (mem_wb_rd != 5'd0) && (mem_wb_rd == id_ex_rs2)) begin
         forward_b = 2'b01;
 
 end
@@ -455,7 +495,7 @@ end
         else begin
             ex_mem_valid <= id_ex_valid;
             ex_mem_alu_result <= alu_result;
-            ex_mem_rs2_data   <= id_ex_rs2_data;
+            ex_mem_rs2_data <= forwarded_rs2_data;
             ex_mem_pc_plus_4  <= ex_pc_plus_4;
             ex_mem_rd         <= id_ex_rd;
 
@@ -550,4 +590,61 @@ end
     end
 
 
+always_comb begin
+
+    if_id_uses_rs1 = 1'b0;
+    if_id_uses_rs2 = 1'b0;
+
+    case (if_id_instruction[6:0])
+
+        7'b0110011: begin       // R-type
+            if_id_uses_rs1 = 1'b1;
+            if_id_uses_rs2 = 1'b1;
+        end
+
+        7'b0010011: begin       // I-type arithmetic e.g. ADDI
+            if_id_uses_rs1 = 1'b1;
+        end
+
+        7'b0000011: begin       // LOAD
+            if_id_uses_rs1 = 1'b1;
+        end
+
+        7'b0100011: begin       // STORE
+            if_id_uses_rs1 = 1'b1;
+            if_id_uses_rs2 = 1'b1;
+        end
+
+        7'b1100011: begin       // BRANCH
+            if_id_uses_rs1 = 1'b1;
+            if_id_uses_rs2 = 1'b1;
+        end
+
+        7'b1100111: begin       // JALR, if used later
+            if_id_uses_rs1 = 1'b1;
+        end
+
+        default: begin
+            if_id_uses_rs1 = 1'b0;
+            if_id_uses_rs2 = 1'b0;
+        end
+
+    endcase
+
+end
+
+always_comb begin
+
+    load_use_hazard = 1'b0;
+
+    if (id_ex_valid && id_ex_mem_read && (id_ex_rd != 5'd0) && if_id_valid && (
+            (if_id_uses_rs1 && (id_ex_rd == rs1)) ||
+            (if_id_uses_rs2 && (id_ex_rd == rs2))
+        ))
+         begin
+        load_use_hazard = 1'b1;
+    end
+
+        
+end
 endmodule
