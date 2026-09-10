@@ -25,7 +25,7 @@ module control_unit (
     input  logic [6:0] opcode,
     input  logic [2:0] funct3,
     input  logic [6:0] funct7,
-
+    output logic jalr,
     output logic reg_write,
     output logic alu_src,
     output logic mem_read,
@@ -57,6 +57,7 @@ module control_unit (
         // Default control values
         mem_to_reg = 1'b0;
         jump = 1'b0;
+        jalr        = 1'b0;
         reg_write   = 1'b0;
         alu_src     = 1'b0;
         mem_read    = 1'b0;
@@ -103,6 +104,20 @@ module control_unit (
 7'b1101111: begin   
     reg_write = 1'b1;
     jump      = 1'b1;
+end
+
+7'b1100111: begin       // JALR
+    jalr       = 1'b1;
+    jump       = 1'b0;  // jump is your JAL signal
+    reg_write  = 1'b1;
+
+    alu_src    = 1'b1;
+    mem_read   = 1'b0;
+    mem_write  = 1'b0;
+    branch     = 1'b0;
+    mem_to_reg = 1'b0;
+    imm_sel    = IMM_I;  
+    alu_control = ALU_ADD;   
 end
 
   // Load: LW

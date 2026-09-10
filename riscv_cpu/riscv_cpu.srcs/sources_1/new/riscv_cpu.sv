@@ -55,7 +55,8 @@ logic mem_wb_valid;
     // ============================================================
     // ID STAGE SIGNALS
     // ============================================================
-
+    // jalr
+    logic jalr;
     // Register addresses decoded from IF/ID instruction
     logic [4:0] rs1;
     logic [4:0] rs2;
@@ -86,7 +87,7 @@ logic mem_wb_valid;
 
     // Datapath
     logic [31:0] id_ex_pc;
-
+    logic id_ex_jalr;
     logic [4:0]  id_ex_rs1;
     logic [4:0]  id_ex_rs2;
     logic [4:0]  id_ex_rd;
@@ -118,6 +119,7 @@ logic mem_wb_valid;
 
     logic [31:0] ex_branch_target;
     logic [31:0] ex_jump_target;
+    logic [31:0] ex_jalr_target;
     logic        ex_branch_taken;
 
     logic [31:0] ex_pc_plus_4;
@@ -168,7 +170,9 @@ logic mem_wb_valid;
 
     logic [31:0] write_data;
 
-
+    // flushing for branch instructions
+    logic control_flush;
+    
     // ============================================================
     // IF STAGE
     // ============================================================
@@ -197,21 +201,24 @@ logic mem_wb_valid;
     // EX-stage branch/jump information rather than live ID signals.
     // ------------------------------------------------------------
 
-    always_comb begin
+  always_comb begin
 
-        if (load_use_hazard)
-            next_pc = pc_value;
-        
-        else if (id_ex_jal)
-            next_pc = ex_jump_target;
+    if (id_ex_valid && id_ex_jalr)
+        next_pc = ex_jalr_target;
 
-        else if (ex_branch_taken)
-            next_pc = ex_branch_target;
+    else if (id_ex_valid && id_ex_jal)
+        next_pc = ex_jump_target;
 
-        else
-            next_pc = pc_plus_4;
+    else if (id_ex_valid && ex_branch_taken)
+        next_pc = ex_branch_target;
 
-    end
+    else if (load_use_hazard)
+        next_pc = pc_value;
+
+    else
+        next_pc = pc_plus_4;
+
+end
 
 
     // ============================================================
@@ -226,12 +233,17 @@ logic mem_wb_valid;
             if_id_instruction <= 32'b0;
         end
 
-        else if (load_use_hazard) begin
+        else if (control_flush) begin
+            if_id_valid       <= 1'b0;
+            if_id_pc          <= 32'b0;
+            if_id_instruction <= 32'b0;
+        end
 
-            if_id_valid <= if_id_valid;
-            if_id_pc <= if_id_pc;
+        else if (load_use_hazard) begin
+            if_id_valid       <= if_id_valid;
+            if_id_pc          <= if_id_pc;
             if_id_instruction <= if_id_instruction;
-  end
+        end
 
        else begin
 
@@ -260,6 +272,7 @@ end
         .funct7      (if_id_instruction[31:25]),
 
         .jump        (jump),
+        .jalr        (jalr),
         .imm_sel     (imm_sel),
 
         .reg_write   (reg_write),
@@ -329,10 +342,39 @@ end
             id_ex_mem_to_reg  <= 1'b0;
             id_ex_branch      <= 1'b0;
             id_ex_jal         <= 1'b0;
+            id_ex_jalr        <= 1'b0;
 
             id_ex_alu_control <= 4'b0;
 
         end
+        else if (control_flush) begin
+
+    id_ex_valid       <= 1'b0;
+
+    id_ex_pc          <= 32'b0;
+    id_ex_rs1         <= 5'b0;
+    id_ex_rs2         <= 5'b0;
+    id_ex_rd          <= 5'b0;
+
+    id_ex_rs1_data    <= 32'b0;
+    id_ex_rs2_data    <= 32'b0;
+    id_ex_immediate   <= 32'b0;
+
+    id_ex_funct3      <= 3'b0;
+
+    id_ex_reg_write   <= 1'b0;
+    id_ex_alu_src     <= 1'b0;
+    id_ex_mem_read    <= 1'b0;
+    id_ex_mem_write   <= 1'b0;
+    id_ex_mem_to_reg  <= 1'b0;
+    id_ex_branch      <= 1'b0;
+    id_ex_jal         <= 1'b0;
+    id_ex_jalr        <= 1'b0;
+
+    id_ex_alu_control <= 4'b0;
+
+end
+
         else if (load_use_hazard) begin
 
     id_ex_valid       <= 1'b0;
@@ -355,7 +397,7 @@ end
     id_ex_mem_to_reg  <= 1'b0;
     id_ex_branch      <= 1'b0;
     id_ex_jal         <= 1'b0;
-
+    id_ex_jalr        <= 1'b0;
     id_ex_alu_control <= 4'b0;
 
 end
@@ -382,7 +424,7 @@ end
 
             id_ex_branch      <= branch;
             id_ex_jal         <= jump;
-
+            id_ex_jalr        <= jalr;
             id_ex_alu_control <= alu_control;
 
         end
@@ -402,6 +444,9 @@ end
    logic [31:0] forwarded_rs1_data;
    logic [31:0] forwarded_rs2_data;
 
+   assign ex_jalr_target =
+       (forwarded_rs1_data + id_ex_immediate) & 32'hFFFFFFFE;
+    
    
     // ALU source-B mux
     assign alu_operand_b = id_ex_alu_src ? id_ex_immediate : forwarded_rs2_data;
@@ -505,13 +550,17 @@ end
             ex_mem_mem_write  <= id_ex_mem_write;
 
             ex_mem_mem_to_reg <= id_ex_mem_to_reg;
-            ex_mem_jump       <= id_ex_jal;
+            ex_mem_jump       <= id_ex_jal || id_ex_jalr;
 
         end
 
     end
 
-
+    //branch-flushing younger instructions
+    assign control_flush =
+        id_ex_valid &&
+        (id_ex_jal || id_ex_jalr || ex_branch_taken);
+     
     // ============================================================
     // MEM STAGE
     // ============================================================
@@ -572,9 +621,9 @@ end
 
     // Write-back source selection:
     //
-    // JAL        -> PC + 4
-    // LW         -> Data Memory
-    // Arithmetic -> ALU result
+    // JAL/JALR   -> PC + 4
+    // LW          -> Data Memory
+    // Arithmetic  -> ALU result
 
     always_comb begin
 
@@ -620,7 +669,7 @@ always_comb begin
             if_id_uses_rs2 = 1'b1;
         end
 
-        7'b1100111: begin       // JALR, if used later
+        7'b1100111: begin       // JALR
             if_id_uses_rs1 = 1'b1;
         end
 
