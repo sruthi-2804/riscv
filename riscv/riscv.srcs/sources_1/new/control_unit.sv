@@ -38,12 +38,18 @@ module control_unit (
 );
 
     // ALU control encodings
-    localparam logic [3:0]
-        ALU_ADD = 4'b0000,
-        ALU_SUB = 4'b0001,
-        ALU_AND = 4'b0010,
-        ALU_OR  = 4'b0011;
-
+ localparam logic [3:0]
+    ALU_ADD  = 4'b0000,
+    ALU_SUB  = 4'b0001,
+    ALU_AND  = 4'b0010,
+    ALU_OR   = 4'b0011,
+    ALU_XOR  = 4'b0100,
+    ALU_SLL  = 4'b0101,
+    ALU_SRL  = 4'b0110,
+    ALU_SRA  = 4'b0111,
+    ALU_SLT  = 4'b1000,
+    ALU_SLTU = 4'b1001;
+    
     // Immediate type encodings
     localparam logic [2:0]
         IMM_I = 3'b000,
@@ -68,38 +74,91 @@ module control_unit (
 
         case (opcode)
 
-            // R-type: ADD, SUB, AND, OR
-            7'b0110011: begin
-                reg_write = 1'b1;
-                alu_src   = 1'b0;
+ // R-type integer ALU instructions
+7'b0110011: begin
+    reg_write = 1'b1;
+    alu_src   = 1'b0;
 
-                case (funct3)
+    case (funct3)
 
-                    3'b000: begin
-                        if (funct7 == 7'b0100000)
-                            alu_control = ALU_SUB;
-                        else
-                            alu_control = ALU_ADD;
-                    end
+        3'b000: begin
+            if (funct7 == 7'b0100000)
+                alu_control = ALU_SUB;
+            else
+                alu_control = ALU_ADD;
+        end
 
-                    3'b111:
-                        alu_control = ALU_AND;
+        3'b001:
+            alu_control = ALU_SLL;
 
-                    3'b110:
-                        alu_control = ALU_OR;
+        3'b010:
+            alu_control = ALU_SLT;
 
-                    default:
-                        alu_control = ALU_ADD;
+        3'b011:
+            alu_control = ALU_SLTU;
 
-                endcase
-            end
-  // I-type arithmetic: ADDI
-     7'b0010011: begin
-     reg_write   = 1'b1;
-     alu_src     = 1'b1;
-     imm_sel     = IMM_I;
-     alu_control = ALU_ADD;
-     end
+        3'b100:
+            alu_control = ALU_XOR;
+
+        3'b101: begin
+            if (funct7 == 7'b0100000)
+                alu_control = ALU_SRA;
+            else
+                alu_control = ALU_SRL;
+        end
+
+        3'b110:
+            alu_control = ALU_OR;
+
+        3'b111:
+            alu_control = ALU_AND;
+
+        default:
+            alu_control = ALU_ADD;
+
+    endcase
+end
+// I-type arithmetic/logical/shift instructions
+7'b0010011: begin
+    reg_write = 1'b1;
+    alu_src   = 1'b1;
+    imm_sel   = IMM_I;
+
+    case (funct3)
+
+        3'b000:
+            alu_control = ALU_ADD;   // ADDI
+
+        3'b001:
+            alu_control = ALU_SLL;   // SLLI
+
+        3'b010:
+            alu_control = ALU_SLT;   // SLTI
+
+        3'b011:
+            alu_control = ALU_SLTU;  // SLTIU
+
+        3'b100:
+            alu_control = ALU_XOR;   // XORI
+
+        3'b101: begin
+            if (funct7 == 7'b0100000)
+                alu_control = ALU_SRA;   // SRAI
+            else
+                alu_control = ALU_SRL;   // SRLI
+        end
+
+        3'b110:
+            alu_control = ALU_OR;    // ORI
+
+        3'b111:
+            alu_control = ALU_AND;   // ANDI
+
+        default:
+            alu_control = ALU_ADD;
+
+    endcase
+end
      // JAL
 7'b1101111: begin   
     reg_write = 1'b1;

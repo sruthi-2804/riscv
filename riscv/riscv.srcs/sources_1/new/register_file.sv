@@ -38,14 +38,20 @@ module register_file (
 logic [31:0] registers [0:31];
 
 assign read_data_1 =
-    (read_addr_1 == 5'd0) ?
-    32'd0 :
-    registers[read_addr_1];
+    (read_addr_1 == 5'd0) ? 32'b0 :
+    (write_enable &&
+     (write_addr != 5'd0) &&
+     (write_addr == read_addr_1))
+        ? write_data
+        : registers[read_addr_1];
 
 assign read_data_2 =
-    (read_addr_2 == 5'd0) ?
-    32'd0 :
-    registers[read_addr_2];
+    (read_addr_2 == 5'd0) ? 32'b0 :
+    (write_enable &&
+     (write_addr != 5'd0) &&
+     (write_addr == read_addr_2))
+        ? write_data
+        : registers[read_addr_2];
 
 always_ff @(posedge clk)
 begin
