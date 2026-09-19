@@ -23,6 +23,18 @@ module riscv_cpu (
     input logic clk,
     input logic reset
 );
+    // Memory access size / operand-A select encodings.
+    // Must match the encodings in control_unit.
+    localparam logic [1:0]
+        MEM_BYTE = 2'b00,
+        MEM_HALF = 2'b01,
+        MEM_WORD = 2'b10;
+
+    localparam logic [1:0]
+        ALU_A_RS1  = 2'b00,
+        ALU_A_PC   = 2'b01,
+        ALU_A_ZERO = 2'b10;
+
 //hazard logic
 logic load_use_hazard;
 logic if_id_uses_rs1;
@@ -79,6 +91,9 @@ logic mem_wb_valid;
     logic       branch;
     logic       jump;
     logic [3:0] alu_control;
+    logic [1:0] mem_size;
+    logic       load_unsigned;
+    logic [1:0] alu_a_sel;
 
 
     // ============================================================
@@ -91,13 +106,15 @@ logic mem_wb_valid;
     logic [4:0]  id_ex_rs1;
     logic [4:0]  id_ex_rs2;
     logic [4:0]  id_ex_rd;
-
     logic [31:0] id_ex_rs1_data;
     logic [31:0] id_ex_rs2_data;
     logic [31:0] id_ex_immediate;
-
     logic [2:0]  id_ex_funct3;
-
+    logic [1:0] id_ex_mem_size;
+    logic id_ex_load_unsigned;
+    logic [1:0] id_ex_alu_a_sel;
+    logic [31:0] alu_operand_a;
+    
     // Control
     logic        id_ex_reg_write;
     logic        id_ex_alu_src;
@@ -134,7 +151,8 @@ logic mem_wb_valid;
     logic [31:0] ex_mem_rs2_data;
     logic [31:0] ex_mem_pc_plus_4;
     logic [4:0]  ex_mem_rd;
-
+     logic [1:0] ex_mem_mem_size;
+     logic ex_mem_load_unsigned;
     // MEM/WB control information
     logic        ex_mem_reg_write;
     logic        ex_mem_mem_read;
@@ -148,7 +166,7 @@ logic mem_wb_valid;
     // ============================================================
 
     logic [31:0] mem_read_data;
-
+    logic [31:0] load_data_processed;
 
     // ============================================================
     // MEM/WB PIPELINE REGISTER
@@ -270,7 +288,9 @@ end
         .opcode      (if_id_instruction[6:0]),
         .funct3      (if_id_instruction[14:12]),
         .funct7      (if_id_instruction[31:25]),
-
+        .mem_size      (mem_size),
+        .load_unsigned (load_unsigned),
+        .alu_a_sel     (alu_a_sel),
         .jump        (jump),
         .jalr        (jalr),
         .imm_sel     (imm_sel),
@@ -343,8 +363,12 @@ end
             id_ex_branch      <= 1'b0;
             id_ex_jal         <= 1'b0;
             id_ex_jalr        <= 1'b0;
-
+            
             id_ex_alu_control <= 4'b0;
+            id_ex_mem_size      <= MEM_WORD;
+            id_ex_load_unsigned <= 1'b0;
+            id_ex_alu_a_sel <= ALU_A_RS1;
+            
 
         end
         else if (control_flush) begin
@@ -372,7 +396,9 @@ end
     id_ex_jalr        <= 1'b0;
 
     id_ex_alu_control <= 4'b0;
-
+    id_ex_mem_size      <= MEM_WORD;
+    id_ex_load_unsigned <= 1'b0;
+    id_ex_alu_a_sel <= ALU_A_RS1;
 end
 
         else if (load_use_hazard) begin
@@ -399,7 +425,9 @@ end
     id_ex_jal         <= 1'b0;
     id_ex_jalr        <= 1'b0;
     id_ex_alu_control <= 4'b0;
-
+    id_ex_mem_size      <= MEM_WORD;
+    id_ex_load_unsigned <= 1'b0;
+    id_ex_alu_a_sel <= ALU_A_RS1;
 end
 
         else begin
@@ -426,7 +454,10 @@ end
             id_ex_jal         <= jump;
             id_ex_jalr        <= jalr;
             id_ex_alu_control <= alu_control;
-
+            id_ex_load_unsigned <= load_unsigned;
+            id_ex_mem_size      <= mem_size;
+             id_ex_alu_a_sel <= alu_a_sel;
+        
         end
 
     end
@@ -446,6 +477,24 @@ end
 
    assign ex_jalr_target =
        (forwarded_rs1_data + id_ex_immediate) & 32'hFFFFFFFE;
+       
+       always_comb begin
+    case (id_ex_alu_a_sel)
+
+        ALU_A_RS1:
+            alu_operand_a = forwarded_rs1_data;
+
+        ALU_A_PC:
+            alu_operand_a = id_ex_pc;
+
+        ALU_A_ZERO:
+            alu_operand_a = 32'b0;
+
+        default:
+            alu_operand_a = forwarded_rs1_data;
+
+    endcase
+end
     
    
     // ALU source-B mux
@@ -453,7 +502,7 @@ end
 
 
     alu alu_inst (
-        .operand_a(forwarded_rs1_data),
+        .operand_a(alu_operand_a),
         .operand_b   (alu_operand_b),
         .alu_control (id_ex_alu_control),
         .result      (alu_result)
@@ -519,7 +568,7 @@ end
     // ============================================================
     // EX/MEM PIPELINE REGISTER
     // ============================================================
-
+    
     always_ff @(posedge clk or posedge reset) begin
 
         if (reset) begin
@@ -534,10 +583,14 @@ end
             ex_mem_mem_write  <= 1'b0;
             ex_mem_mem_to_reg <= 1'b0;
             ex_mem_jump       <= 1'b0;
+            ex_mem_mem_size      <= MEM_WORD;
+            ex_mem_load_unsigned <= 1'b0;
 
         end
 
         else begin
+            ex_mem_mem_size <= id_ex_mem_size;
+            ex_mem_load_unsigned <= id_ex_load_unsigned;
             ex_mem_valid <= id_ex_valid;
             ex_mem_alu_result <= alu_result;
             ex_mem_rs2_data <= forwarded_rs2_data;
@@ -565,6 +618,63 @@ end
     // MEM STAGE
     // ============================================================
     logic data_mem_write_enable;
+    logic [3:0]  store_byte_enable;
+    logic [31:0] store_write_data;
+    
+    
+    always_comb begin
+    store_byte_enable = 4'b0000;
+    store_write_data  = ex_mem_rs2_data;
+
+    case (ex_mem_mem_size)
+
+        MEM_BYTE: begin
+            case (ex_mem_alu_result[1:0])
+                2'b00: begin
+                    store_byte_enable = 4'b0001;
+                    store_write_data  = {24'b0, ex_mem_rs2_data[7:0]};
+                end
+
+                2'b01: begin
+                    store_byte_enable = 4'b0010;
+                    store_write_data  = {16'b0, ex_mem_rs2_data[7:0], 8'b0};
+                end
+
+                2'b10: begin
+                    store_byte_enable = 4'b0100;
+                    store_write_data  = {8'b0, ex_mem_rs2_data[7:0], 16'b0};
+                end
+
+                2'b11: begin
+                    store_byte_enable = 4'b1000;
+                    store_write_data  = {ex_mem_rs2_data[7:0], 24'b0};
+                end
+            endcase
+        end
+
+        MEM_HALF: begin
+            if (ex_mem_alu_result[1] == 1'b0) begin
+                store_byte_enable = 4'b0011;
+                store_write_data  = {16'b0, ex_mem_rs2_data[15:0]};
+            end
+            else begin
+                store_byte_enable = 4'b1100;
+                store_write_data  = {ex_mem_rs2_data[15:0], 16'b0};
+            end
+        end
+
+        MEM_WORD: begin
+            store_byte_enable = 4'b1111;
+            store_write_data  = ex_mem_rs2_data;
+        end
+
+        default: begin
+            store_byte_enable = 4'b0000;
+            store_write_data  = ex_mem_rs2_data;
+        end
+
+    endcase
+end
     assign data_mem_write_enable = ex_mem_valid && ex_mem_mem_write;
     data_memory dmem_inst (
         .clk       (clk),
@@ -574,11 +684,78 @@ end
         .mem_write (data_mem_write_enable),
 
         .address   (ex_mem_alu_result),
-        .write_data(ex_mem_rs2_data),
-
+        .write_data(store_write_data),
+        .byte_enable(store_byte_enable),
         .read_data (mem_read_data)
     );
+always_comb begin
+    load_data_processed = mem_read_data;
 
+    case (ex_mem_mem_size)
+
+        MEM_BYTE: begin
+            case (ex_mem_alu_result[1:0])
+                2'b00: begin
+                    if (ex_mem_load_unsigned)
+                        load_data_processed = {24'b0, mem_read_data[7:0]};
+                    else
+                        load_data_processed = {{24{mem_read_data[7]}},
+                                               mem_read_data[7:0]};
+                end
+
+                2'b01: begin
+                    if (ex_mem_load_unsigned)
+                        load_data_processed = {24'b0, mem_read_data[15:8]};
+                    else
+                        load_data_processed = {{24{mem_read_data[15]}},
+                                               mem_read_data[15:8]};
+                end
+
+                2'b10: begin
+                    if (ex_mem_load_unsigned)
+                        load_data_processed = {24'b0, mem_read_data[23:16]};
+                    else
+                        load_data_processed = {{24{mem_read_data[23]}},
+                                               mem_read_data[23:16]};
+                end
+
+                2'b11: begin
+                    if (ex_mem_load_unsigned)
+                        load_data_processed = {24'b0, mem_read_data[31:24]};
+                    else
+                        load_data_processed = {{24{mem_read_data[31]}},
+                                               mem_read_data[31:24]};
+                end
+            endcase
+        end
+
+        MEM_HALF: begin
+            if (ex_mem_alu_result[1] == 1'b0) begin
+                if (ex_mem_load_unsigned)
+                    load_data_processed = {16'b0, mem_read_data[15:0]};
+                else
+                    load_data_processed = {{16{mem_read_data[15]}},
+                                           mem_read_data[15:0]};
+            end
+            else begin
+                if (ex_mem_load_unsigned)
+                    load_data_processed = {16'b0, mem_read_data[31:16]};
+                else
+                    load_data_processed = {{16{mem_read_data[31]}},
+                                           mem_read_data[31:16]};
+            end
+        end
+
+        MEM_WORD: begin
+            load_data_processed = mem_read_data;
+        end
+
+        default: begin
+            load_data_processed = mem_read_data;
+        end
+
+    endcase
+end
 
     // ============================================================
     // MEM/WB PIPELINE REGISTER
@@ -599,9 +776,10 @@ end
 
         end
 
+
         else begin
             mem_wb_valid <= ex_mem_valid;
-            mem_wb_mem_read_data <= mem_read_data;
+            mem_wb_mem_read_data <= load_data_processed;
             mem_wb_alu_result    <= ex_mem_alu_result;
             mem_wb_pc_plus_4     <= ex_mem_pc_plus_4;
             mem_wb_rd            <= ex_mem_rd;

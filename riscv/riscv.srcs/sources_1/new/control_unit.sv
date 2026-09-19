@@ -34,7 +34,10 @@ module control_unit (
     output logic jump,
     output logic [2:0] imm_sel,
     output logic mem_to_reg,
-    output logic [3:0] alu_control
+    output logic [1:0] mem_size,
+    output logic load_unsigned,
+    output logic [3:0] alu_control,
+    output logic [1:0] alu_a_sel
 );
 
     // ALU control encodings
@@ -57,6 +60,19 @@ module control_unit (
         IMM_B = 3'b010,
         IMM_U = 3'b011,
         IMM_J = 3'b100;
+        
+  localparam logic [1:0]
+    MEM_BYTE = 2'b00,
+    MEM_HALF = 2'b01,
+    MEM_WORD = 2'b10;
+    
+    //lui/auipc
+    localparam logic [1:0]
+    ALU_A_RS1  = 2'b00,
+    ALU_A_PC   = 2'b01,
+    ALU_A_ZERO = 2'b10;
+    
+    
 
     always_comb begin
 
@@ -71,91 +87,163 @@ module control_unit (
         branch      = 1'b0;
         alu_control = ALU_ADD;
         imm_sel     = IMM_I;
-
+        alu_a_sel = ALU_A_RS1;
+        mem_size      = MEM_WORD;
+        load_unsigned = 1'b0;
+        
         case (opcode)
 
  // R-type integer ALU instructions
 7'b0110011: begin
-    reg_write = 1'b1;
-    alu_src   = 1'b0;
+    alu_src = 1'b0;
 
     case (funct3)
 
         3'b000: begin
-            if (funct7 == 7'b0100000)
+            if (funct7 == 7'b0100000) begin
+                reg_write   = 1'b1;
                 alu_control = ALU_SUB;
-            else
+            end
+            else if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
                 alu_control = ALU_ADD;
+            end
         end
 
-        3'b001:
-            alu_control = ALU_SLL;
+        3'b001: begin
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_SLL;
+            end
+        end
 
-        3'b010:
-            alu_control = ALU_SLT;
+        3'b010: begin
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_SLT;
+            end
+        end
 
-        3'b011:
-            alu_control = ALU_SLTU;
+        3'b011: begin
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_SLTU;
+            end
+        end
 
-        3'b100:
-            alu_control = ALU_XOR;
+        3'b100: begin
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_XOR;
+            end
+        end
 
         3'b101: begin
-            if (funct7 == 7'b0100000)
+            if (funct7 == 7'b0100000) begin
+                reg_write   = 1'b1;
                 alu_control = ALU_SRA;
-            else
+            end
+            else if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
                 alu_control = ALU_SRL;
+            end
         end
 
-        3'b110:
-            alu_control = ALU_OR;
+        3'b110: begin
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_OR;
+            end
+        end
 
-        3'b111:
-            alu_control = ALU_AND;
+        3'b111: begin
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_AND;
+            end
+        end
 
-        default:
-            alu_control = ALU_ADD;
+        default: begin
+            reg_write = 1'b0;
+        end
 
     endcase
 end
+// U-type
+7'b0110111: begin       // LUI
+    reg_write   = 1'b1;
+    alu_src     = 1'b1;
+    imm_sel     = IMM_U;
+    alu_control = ALU_ADD;
+    alu_a_sel   = ALU_A_ZERO;
+end
+
+7'b0010111: begin       // AUIPC
+    reg_write   = 1'b1;
+    alu_src     = 1'b1;
+    imm_sel     = IMM_U;
+    alu_control = ALU_ADD;
+    alu_a_sel   = ALU_A_PC;
+end
+
 // I-type arithmetic/logical/shift instructions
 7'b0010011: begin
-    reg_write = 1'b1;
     alu_src   = 1'b1;
     imm_sel   = IMM_I;
 
     case (funct3)
 
-        3'b000:
+        3'b000: begin
+            reg_write   = 1'b1;
             alu_control = ALU_ADD;   // ADDI
-
-        3'b001:
-            alu_control = ALU_SLL;   // SLLI
-
-        3'b010:
-            alu_control = ALU_SLT;   // SLTI
-
-        3'b011:
-            alu_control = ALU_SLTU;  // SLTIU
-
-        3'b100:
-            alu_control = ALU_XOR;   // XORI
-
-        3'b101: begin
-            if (funct7 == 7'b0100000)
-                alu_control = ALU_SRA;   // SRAI
-            else
-                alu_control = ALU_SRL;   // SRLI
         end
 
-        3'b110:
+        3'b001: begin               // SLLI: only funct7 = 0000000 is legal
+            if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_SLL;
+            end
+        end
+
+        3'b010: begin
+            reg_write   = 1'b1;
+            alu_control = ALU_SLT;   // SLTI
+        end
+
+        3'b011: begin
+            reg_write   = 1'b1;
+            alu_control = ALU_SLTU;  // SLTIU
+        end
+
+        3'b100: begin
+            reg_write   = 1'b1;
+            alu_control = ALU_XOR;   // XORI
+        end
+
+        3'b101: begin               // SRLI/SRAI: only 0000000 / 0100000 legal
+            if (funct7 == 7'b0100000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_SRA;   // SRAI
+            end
+            else if (funct7 == 7'b0000000) begin
+                reg_write   = 1'b1;
+                alu_control = ALU_SRL;   // SRLI
+            end
+        end
+
+        3'b110: begin
+            reg_write   = 1'b1;
             alu_control = ALU_OR;    // ORI
+        end
 
-        3'b111:
+        3'b111: begin
+            reg_write   = 1'b1;
             alu_control = ALU_AND;   // ANDI
+        end
 
-        default:
-            alu_control = ALU_ADD;
+        default: begin
+            reg_write = 1'b0;
+        end
 
     endcase
 end
@@ -163,53 +251,145 @@ end
 7'b1101111: begin   
     reg_write = 1'b1;
     jump      = 1'b1;
+    imm_sel   = IMM_J;
 end
 
-7'b1100111: begin       // JALR
-    jalr       = 1'b1;
-    jump       = 1'b0;  // jump is your JAL signal
-    reg_write  = 1'b1;
-
-    alu_src    = 1'b1;
-    mem_read   = 1'b0;
-    mem_write  = 1'b0;
-    branch     = 1'b0;
-    mem_to_reg = 1'b0;
-    imm_sel    = IMM_I;  
-    alu_control = ALU_ADD;   
+7'b1100111: begin       // JALR (only funct3 = 000 is a valid encoding)
+    if (funct3 == 3'b000) begin
+        jalr        = 1'b1;
+        reg_write   = 1'b1;
+        alu_src     = 1'b1;
+        imm_sel     = IMM_I;
+        alu_control = ALU_ADD;
+    end
 end
 
-  // Load: LW
+  // Loads. LW is supported by the current 32-bit memory datapath.
+  // LB/LH/LBU/LHU need byte-lane selection and sign/zero extension,
+  // so they intentionally decode to the safe defaults for now.
+ 
+    
   7'b0000011: begin
-  reg_write   = 1'b1;
-  alu_src     = 1'b1;
-  mem_read    = 1'b1;
-  mem_write   = 1'b0;
-  mem_to_reg  = 1'b1;
-  alu_control = ALU_ADD;
-  imm_sel     = IMM_I;
-end
+  case (funct3)
 
- // Store: SW
+    3'b000: begin   // LB
+        mem_read       = 1'b1;
+        reg_write      = 1'b1;
+        mem_to_reg     = 1'b1;
+        alu_src        = 1'b1;
+        imm_sel        = IMM_I;
+
+        mem_size       = MEM_BYTE;
+        load_unsigned  = 1'b0;
+    end
+
+    3'b001: begin   // LH
+        mem_read       = 1'b1;
+        reg_write      = 1'b1;
+        mem_to_reg     = 1'b1;
+        alu_src        = 1'b1;
+        imm_sel        = IMM_I;
+
+        mem_size       = MEM_HALF;
+        load_unsigned  = 1'b0;
+    end
+
+    3'b010: begin   // LW
+        mem_read       = 1'b1;
+        reg_write      = 1'b1;
+        mem_to_reg     = 1'b1;
+        alu_src        = 1'b1;
+        imm_sel        = IMM_I;
+
+        mem_size       = MEM_WORD;
+        load_unsigned  = 1'b0;
+    end
+
+    3'b100: begin   // LBU
+        mem_read       = 1'b1;
+        reg_write      = 1'b1;
+        mem_to_reg     = 1'b1;
+        alu_src        = 1'b1;
+        imm_sel        = IMM_I;
+
+        mem_size       = MEM_BYTE;
+        load_unsigned  = 1'b1;
+    end
+
+    3'b101: begin   // LHU
+        mem_read       = 1'b1;
+        reg_write      = 1'b1;
+        mem_to_reg     = 1'b1;
+        alu_src        = 1'b1;
+        imm_sel        = IMM_I;
+
+        mem_size       = MEM_HALF;
+        load_unsigned  = 1'b1;
+    end
+
+    default: begin
+   mem_size      = MEM_WORD;
+  load_unsigned = 1'b0;
+    end
+
+endcase
+end
+ // Stores. SW is supported by the current 32-bit memory datapath.
+ // SB/SH need byte masks or byte enables, so they intentionally decode
+ // to the safe defaults for now.
    7'b0100011: begin
-   reg_write   = 1'b0;
-   alu_src     = 1'b1;
-   mem_read    = 1'b0;
-   mem_write   = 1'b1;
-  alu_control = ALU_ADD;
-  imm_sel= IMM_S;
+   case (funct3)
+
+    3'b000: begin   // SB
+        mem_write = 1'b1;
+        alu_src   = 1'b1;
+        imm_sel   = IMM_S;
+        mem_size  = MEM_BYTE;
+    end
+
+    3'b001: begin   // SH
+        mem_write = 1'b1;
+        alu_src   = 1'b1;
+        imm_sel   = IMM_S;
+        mem_size  = MEM_HALF;
+    end
+
+    3'b010: begin   // SW
+        mem_write = 1'b1;
+        alu_src   = 1'b1;
+        imm_sel   = IMM_S;
+        mem_size  = MEM_WORD;
+    end
+
+    default: begin
+        // safe defaults
+    end
+
+endcase
     end
   // Branch
      7'b1100011: begin
-    reg_write   = 1'b0;
-    alu_src     = 1'b0;
-    mem_read    = 1'b0;
-    mem_write   = 1'b0;
-    branch      = 1'b1;
-    alu_control = ALU_SUB;
-    imm_sel     = IMM_B;
-    end
+    case (funct3)
+        3'b000,
+        3'b001,
+        3'b100,
+        3'b101,
+        3'b110,
+        3'b111: begin
+            reg_write   = 1'b0;
+            alu_src     = 1'b0;
+            mem_read    = 1'b0;
+            mem_write   = 1'b0;
+            branch      = 1'b1;
+            alu_control = ALU_SUB;
+            imm_sel     = IMM_B;
+        end
 
+        default: begin
+            branch = 1'b0;
+        end
+    endcase
+    end
 
    default: begin
    reg_write   = 1'b0;

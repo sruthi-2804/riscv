@@ -27,7 +27,8 @@ module data_memory (
     input  logic        mem_write,
     input  logic [31:0] address,
     input  logic [31:0] write_data,
-    output logic [31:0] read_data
+    output logic [31:0] read_data,
+    input logic [3:0] byte_enable
 );
 
     // 256 memory locations, each 32 bits wide
@@ -43,8 +44,20 @@ module data_memory (
         end
 
         else if (mem_write) begin
-            memory[address[9:2]] <= write_data;
-        end
+
+    if (byte_enable[0])
+        memory[address[9:2]][7:0] <= write_data[7:0];
+
+    if (byte_enable[1])
+        memory[address[9:2]][15:8] <= write_data[15:8];
+
+    if (byte_enable[2])
+        memory[address[9:2]][23:16] <= write_data[23:16];
+
+    if (byte_enable[3])
+        memory[address[9:2]][31:24] <= write_data[31:24];
+
+end
 
     end
 //read op

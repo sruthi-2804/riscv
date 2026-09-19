@@ -59,8 +59,8 @@ module riscv_cpu_tb;
         #12;
         reset = 1'b0;
 
-        // Enough time for instructions to cross all 5 stages
-        #200;
+        // Enough time for the directed branch program to cross all 5 stages
+        #400;
 
         $finish;
     end
@@ -111,4 +111,3 @@ module riscv_cpu_tb;
 
 
 endmodule
-
