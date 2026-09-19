@@ -264,11 +264,8 @@ end
     end
 end
 
-  // Loads. LW is supported by the current 32-bit memory datapath.
-  // LB/LH/LBU/LHU need byte-lane selection and sign/zero extension,
-  // so they intentionally decode to the safe defaults for now.
- 
-    
+  // Loads: LB/LH/LW/LBU/LHU. mem_size and load_unsigned drive the
+  // byte-lane selection and sign/zero extension in the MEM stage.
   7'b0000011: begin
   case (funct3)
 
@@ -334,9 +331,8 @@ end
 
 endcase
 end
- // Stores. SW is supported by the current 32-bit memory datapath.
- // SB/SH need byte masks or byte enables, so they intentionally decode
- // to the safe defaults for now.
+ // Stores: SB/SH/SW. mem_size selects the byte-enable pattern and
+ // store-data lane alignment in the MEM stage.
    7'b0100011: begin
    case (funct3)
 
