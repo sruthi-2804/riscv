@@ -13,3 +13,5 @@
 *.pb
 .Xil/
 xsim.dir/
+*.vcd
+xsim.covdb/
