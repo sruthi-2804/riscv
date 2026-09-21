@@ -7,9 +7,17 @@
 //    from its 32-bit seed (independent of simulator RNG state)
 //  - generator emits ONLY instructions the RTL implements, with legal
 //    operands: loads/stores are x0-based with size-aligned in-range
-//    offsets; branches/JAL jump forward only (guaranteed termination);
-//    JALR is emitted as an "ADDI base, x0, target ; JALR rd, 0(base)"
-//    pair so its target is always a legal forward program address
+//    offsets; free-standing branches/JAL jump forward only; JALR is
+//    emitted as an "ADDI base, x0, target ; JALR rd, 0(base)" pair so its
+//    target is always a legal forward program address
+//  - BACKWARD branches are produced only as part of a counted-loop
+//    construct (category 8), whose trip count is fixed at generation time
+//    by a dedicated countdown register that nothing in the body may write
+//    and which is compared against x0. Loop slots are fenced off from
+//    outside branch/jump targets, so a program can never jump past a
+//    loop's counter initialisation. Termination is therefore structural,
+//    not probabilistic, and the reference model's step backstop remains
+//    as a second line of defence.
 //  - reference model: 32 regs (x0 pinned to 0), PC control flow, 256-word
 //    data memory, RV32I semantics for every implemented instruction
 //  - after each program the DUT's committed architectural state (register
@@ -90,18 +98,24 @@ module tb_cpu_random_check;
     // ------------------------------------------------------------------
     logic [31:0] prog [0:255];
     bit          jalr_2nd [0:255];   // slots holding a JALR (2nd half of pair)
+    bit          loop_slot [0:255];  // slots belonging to a counted-loop construct
+    bit          loop_br  [0:255];   // slots holding a loop's own backward branch
     int          park;               // index of the parking JAL x0,0
 
     // generated-category counters (whole run)
     int cnt_alu_r, cnt_alu_i, cnt_shift, cnt_cmp, cnt_utype;
     int cnt_load, cnt_store, cnt_branch, cnt_jal, cnt_jalr, cnt_loaduse;
+    int cnt_loop, cnt_backbr;
 
-    // pick a forward target index in (idx, len], avoiding JALR 2nd halves
+    // Pick a forward target index in (idx, len], avoiding JALR 2nd halves
+    // and any slot inside a counted-loop construct. Jumping into the middle
+    // of a loop would skip its counter initialisation, which is the one
+    // thing that guarantees the loop terminates.
     function automatic int pick_target(input int idx, input int len);
         int j;
         for (int t = 0; t < 8; t++) begin
             j = idx + 1 + rnd(len - idx);
-            if (!jalr_2nd[j]) return j;
+            if (!jalr_2nd[j] && !loop_slot[j]) return j;
         end
         return len;   // park is always safe
     endfunction
@@ -125,8 +139,10 @@ module tb_cpu_random_check;
         logic [11:0] off;
 
         for (int i = 0; i < 256; i++) begin
-            prog[i]     = NOP;
-            jalr_2nd[i] = 1'b0;
+            prog[i]      = NOP;
+            jalr_2nd[i]  = 1'b0;
+            loop_slot[i] = 1'b0;
+            loop_br[i]   = 1'b0;
         end
         park       = len;
         prog[park] = enc_j(21'd0, 5'd0);   // JAL x0, 0 : park in self-loop
@@ -145,13 +161,16 @@ module tb_cpu_random_check;
                 4: cat = (r < 35) ? 3 : (r < 55) ? 4 : (r < 95) ? ((r & 1) ? 0 : 1) : 2;
                 5: cat = (r < 25) ? 5 : (r < 80) ? ((r & 1) ? 0 : 1) : (r < 90) ? 2 : 3;
                 6: cat = (r < 15) ? 6 : (r < 30) ? 7 : (r < 80) ? ((r & 1) ? 0 : 1) : 3;
-                default:
-                   cat = (r < 15) ? 0 : (r < 30) ? 1 : (r < 38) ? 2 : (r < 53) ? 3 :
-                         (r < 65) ? 4 : (r < 80) ? 5 : (r < 90) ? 6 : 7;
+                7: cat = (r < 13) ? 0 : (r < 26) ? 1 : (r < 34) ? 2 : (r < 47) ? 3 :
+                         (r < 58) ? 4 : (r < 70) ? 5 : (r < 80) ? 6 : (r < 90) ? 7 : 8;
+                default:   // phase 8: counted-loop heavy
+                   cat = (r < 45) ? 8 : (r < 60) ? 3 : (r < 70) ? 4 :
+                         (r < 85) ? ((r & 1) ? 0 : 1) : (r < 92) ? 5 : (r < 97) ? 6 : 2;
             endcase
 
-            // a JALR pair needs two slots
+            // a JALR pair needs two slots; a loop construct needs up to six
             if (cat == 7 && idx >= len - 1) cat = 0;
+            if (cat == 8 && idx + 6 > len)  cat = 0;
 
             case (cat)
                 // -------- R-type ALU (arith/logic/shift/compare) --------
@@ -272,6 +291,88 @@ module tb_cpu_random_check;
                     cnt_jalr++;
                     last_rd = rd;
                 end
+
+                // -------- counted backward loop (guaranteed terminating) --------
+                //   ADDI rc, x0, n          rc = n
+                // top:
+                //   <1..3 straight-line body instructions, none writing rc>
+                //   ADDI rc, rc, -1
+                //   BNE  rc, x0, top        BACKWARD, taken n-1 times
+                //
+                // Termination rests on exactly two properties, both enforced
+                // here rather than hoped for:
+                //   1. rc is decremented once per pass and compared against
+                //      x0, which no instruction can change, so the trip count
+                //      is fixed at n by construction.
+                //   2. nothing in the body writes rc, and no control-flow
+                //      instruction is emitted inside the body, so the only
+                //      way out is through the counter.
+                // Every slot is marked loop_slot so no outside branch or jump
+                // can enter past the initialisation, and the back edge is
+                // marked loop_br so the retarget pass below leaves it alone.
+                8: begin
+                    int body_len;
+                    int n_iter;
+                    int loop_top;
+                    logic [4:0] rc;
+                    logic [4:0] brd;
+                    logic [11:0] boff;
+
+                    body_len = 1 + rnd(3);      // 1..3 body instructions
+                    n_iter   = 2 + rnd(6);      // 2..7 trips
+                    rc       = 1 + rnd(31);     // counter register, never x0
+
+                    prog[idx]      = enc_i(12'(n_iter), 5'd0, 3'b000, rc, 7'b0010011);
+                    loop_slot[idx] = 1'b1;
+                    idx++;
+                    loop_top = idx;
+
+                    for (int k = 0; k < body_len; k++) begin
+                        int bop;
+                        brd = rnd(32);
+                        if (brd == rc) brd = 5'd0;   // never clobber the counter
+                        bop = rnd(4);
+                        case (bop)
+                            0: begin
+                                prog[idx] = enc_r(rnd(2) ? 7'h20 : 7'h00,
+                                                  pick_rs(dep_pct), pick_rs(dep_pct),
+                                                  3'b000, brd);
+                                cnt_alu_r++;
+                            end
+                            1: begin
+                                prog[idx] = enc_i(rnd32(), pick_rs(dep_pct), 3'b000,
+                                                  brd, 7'b0010011);
+                                cnt_alu_i++;
+                            end
+                            2: begin
+                                boff = rnd(256) * 4;
+                                prog[idx] = enc_i(boff, 5'd0, 3'b010, brd, 7'b0000011);
+                                cnt_load++;
+                            end
+                            3: begin
+                                boff = rnd(256) * 4;
+                                prog[idx] = enc_s(boff, pick_rs(dep_pct), 5'd0, 3'b010);
+                                cnt_store++;
+                            end
+                        endcase
+                        loop_slot[idx] = 1'b1;
+                        last_rd        = brd;
+                        idx++;
+                    end
+
+                    // ADDI rc, rc, -1
+                    prog[idx]      = enc_i(12'hFFF, rc, 3'b000, rc, 7'b0010011);
+                    loop_slot[idx] = 1'b1;
+                    idx++;
+
+                    // BNE rc, x0, top   (backward)
+                    prog[idx]      = enc_b(13'((loop_top - idx) * 4), 5'd0, rc, 3'b001);
+                    loop_slot[idx] = 1'b1;
+                    loop_br[idx]   = 1'b1;
+                    cnt_loop++;
+                    cnt_backbr++;
+                    last_rd = rc;
+                end
             endcase
             idx++;
         end
@@ -283,19 +384,28 @@ module tb_cpu_random_check;
         for (int i = 0; i < len; i++) begin
             logic [31:0] w2 = prog[i];
             int tgt;
+            bit bad;
+
+            // A loop's own back edge is the one control transfer that is
+            // MEANT to land inside a loop construct: never retarget it.
+            if (loop_br[i]) continue;
+
             if (w2[6:0] == 7'b1100011) begin
                 tgt = i + ({{19{w2[31]}}, w2[31], w2[7], w2[30:25], w2[11:8], 1'b0} >> 2);
-                if (jalr_2nd[tgt]) prog[i] = enc_b((park - i) * 4, w2[24:20], w2[19:15], w2[14:12]);
+                bad = (tgt < 0) || (tgt > park) || jalr_2nd[tgt] || loop_slot[tgt];
+                if (bad) prog[i] = enc_b((park - i) * 4, w2[24:20], w2[19:15], w2[14:12]);
             end
             else if (w2[6:0] == 7'b1101111 && i != park) begin
                 tgt = i + ({{11{w2[31]}}, w2[31], w2[19:12], w2[20], w2[30:21], 1'b0} >> 2);
-                if (jalr_2nd[tgt]) prog[i] = enc_j((park - i) * 4, w2[11:7]);
+                bad = (tgt < 0) || (tgt > park) || jalr_2nd[tgt] || loop_slot[tgt];
+                if (bad) prog[i] = enc_j((park - i) * 4, w2[11:7]);
             end
             else if (jalr_2nd[i]) begin
                 // pair's target lives in the preceding ADDI's immediate
                 logic [31:0] wa = prog[i-1];
                 tgt = wa[31:20] >> 2;
-                if (jalr_2nd[tgt])
+                bad = (tgt < 0) || (tgt > park) || jalr_2nd[tgt] || loop_slot[tgt];
+                if (bad)
                     prog[i-1] = enc_i(park * 4, 5'd0, 3'b000, wa[11:7], 7'b0010011);
             end
         end
@@ -309,6 +419,7 @@ module tb_cpu_random_check;
     int          ref_steps;
     bit          ref_genbug;
     int          ref_taken, ref_flushes;   // executed control transfers
+    int          ref_back_taken;             // taken branches with a NEGATIVE offset
 
     function automatic logic [31:0] sx12(input logic [11:0] v);
         return {{20{v[11]}}, v};
@@ -327,10 +438,11 @@ module tb_cpu_random_check;
         for (int i = 0; i < 32;  i++) ref_regs[i] = 32'b0;
         for (int i = 0; i < 256; i++) ref_mem[i]  = 32'b0;
         ref_steps = 0; ref_genbug = 0; ref_taken = 0; ref_flushes = 0;
+        ref_back_taken = 0;
 
         pc = 32'b0;
         while (pc != park * 4) begin
-            if (pc[1:0] != 0 || pc > park * 4 || ref_steps > 4 * park + 64) begin
+            if (pc[1:0] != 0 || pc > park * 4 || ref_steps > 64 * park + 256) begin
                 ref_genbug = 1;
                 return;
             end
@@ -437,6 +549,7 @@ module tb_cpu_random_check;
                     if (br_taken) begin
                         pc += {{19{instr[31]}}, instr[31], instr[7], instr[30:25], instr[11:8], 1'b0};
                         ref_taken++; ref_flushes++;
+                        if (instr[31]) ref_back_taken++;   // negative displacement
                     end
                     else pc += 4;
                 end
@@ -464,6 +577,8 @@ module tb_cpu_random_check;
     // ------------------------------------------------------------------
     int total_progs, total_instrs, total_fails, total_genbugs;
     int total_taken, total_flushes;
+    int total_back_taken;
+    int progs_with_loops;
     int fail_seeds  [0:31];
     int fail_phases [0:31];
     int fail_lens   [0:31];
@@ -472,7 +587,9 @@ module tb_cpu_random_check;
         int cycles;
         bit mismatch;
         string first_div;
+        int loops_before;
 
+        loops_before = cnt_loop;
         prng = seed;
         gen_program(phase, len);
         ref_run();
@@ -513,8 +630,10 @@ module tb_cpu_random_check;
 
         total_progs++;
         total_instrs  += ref_steps;
-        total_taken   += ref_taken;
-        total_flushes += ref_flushes;
+        total_taken      += ref_taken;
+        total_flushes    += ref_flushes;
+        total_back_taken += ref_back_taken;
+        if (cnt_loop > loops_before) progs_with_loops++;
 
         if (mismatch) begin
             if (total_fails < 32) begin
@@ -544,8 +663,8 @@ module tb_cpu_random_check;
     // Main
     // ------------------------------------------------------------------
     int unsigned base_seed = 32'd20260919;
-    int progs_per_phase [1:7] = '{40, 40, 40, 40, 40, 40, 60};
-    int len_per_phase   [1:7] = '{20, 25, 25, 30, 30, 30, 40};
+    int progs_per_phase [1:8] = '{40, 40, 40, 40, 40, 40, 60, 60};
+    int len_per_phase   [1:8] = '{20, 25, 25, 30, 30, 30, 40, 40};
 
     initial begin
         int unsigned only_seed;
@@ -565,7 +684,7 @@ module tb_cpu_random_check;
         else begin
             void'($value$plusargs("BASE_SEED=%d", base_seed));
             $display("== randomized run: base_seed=%0d ==", base_seed);
-            for (int ph = 1; ph <= 7; ph++) begin
+            for (int ph = 1; ph <= 8; ph++) begin
                 for (int i = 0; i < progs_per_phase[ph]; i++) begin
                     s = base_seed ^ (ph * 100000 + i * 7919);
                     run_one(s, ph, len_per_phase[ph]);
@@ -585,6 +704,8 @@ module tb_cpu_random_check;
                  cnt_load, cnt_store, cnt_branch, cnt_jal, cnt_jalr, cnt_loaduse);
         $display("control flow      : taken-branches=%0d total-flushing-transfers=%0d",
                  total_taken, total_flushes);
+        $display("backward branches : generated-loops=%0d programs-with-loops=%0d architectural-backward-taken=%0d",
+                 cnt_loop, progs_with_loops, total_back_taken);
         for (int i = 0; i < ((total_fails < 32) ? total_fails : 32); i++)
             $display("repro[%0d]: seed=%0d phase=%0d len=%0d", i, fail_seeds[i], fail_phases[i], fail_lens[i]);
         if (total_fails == 0) $display("CPU_RANDOM_TB: ALL PASS");
