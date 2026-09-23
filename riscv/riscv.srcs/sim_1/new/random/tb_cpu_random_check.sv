@@ -106,6 +106,7 @@ module tb_cpu_random_check;
     int cnt_alu_r, cnt_alu_i, cnt_shift, cnt_cmp, cnt_utype;
     int cnt_load, cnt_store, cnt_branch, cnt_jal, cnt_jalr, cnt_loaduse;
     int cnt_loop, cnt_backbr;
+    longint r_jal_exec, r_jalr_exec;
 
     // Pick a forward target index in (idx, len], avoiding JALR 2nd halves
     // and any slot inside a counted-loop construct. Jumping into the middle
@@ -554,11 +555,13 @@ module tb_cpu_random_check;
                     else pc += 4;
                 end
                 7'b1101111: begin // JAL
+                    r_jal_exec++;
                     wr = 1; res = pc + 4;
                     pc += {{11{instr[31]}}, instr[31], instr[19:12], instr[20], instr[30:21], 1'b0};
                     ref_flushes++;
                 end
                 7'b1100111: begin // JALR
+                    r_jalr_exec++;
                     wr = 1; res = pc + 4;
                     pc = (a + sx12(instr[31:20])) & 32'hFFFFFFFE;
                     ref_flushes++;
@@ -582,6 +585,80 @@ module tb_cpu_random_check;
     int fail_seeds  [0:31];
     int fail_phases [0:31];
     int fail_lens   [0:31];
+
+
+    // ------------------------------------------------------------------
+    // DUT performance-counter campaign instrumentation (testbench only).
+    //
+    // The DUT's counters reset with every generated program, so they are
+    // snapshotted per program and accumulated here. Nothing in this block
+    // drives the DUT; it only reads the counters the RTL already keeps.
+    //
+    // MEASUREMENT ENDPOINT. The snapshot is taken on the first edge at
+    // which instret_count reaches ref_steps, i.e. the edge on which the
+    // last architecturally executed instruction of the program commits.
+    // That endpoint is used instead of the end of the cycle budget because
+    // each program parks on JAL x0,0, and a parking JAL raises
+    // control_flush on every iteration forever - letting the DUT spin to
+    // the end of the budget would swamp flush_count with park iterations
+    // that are not part of the program.
+    //
+    // ONE PARK FLUSH IS STILL INSIDE THE WINDOW. control_flush is raised
+    // in EX, two stages ahead of retirement, so the park's FIRST flush is
+    // counted one cycle before the last real instruction commits. Its two
+    // lost cycles land after the endpoint. That flush is therefore
+    // attributed separately, by matching id_ex_pc against the park
+    // address, rather than assumed - see acc_parkflush below.
+    // ------------------------------------------------------------------
+    bit     snap_arm;
+    bit     snapped;
+    longint snap_target;
+    longint snap_cycle, snap_instr, snap_stall, snap_flush;
+    int     snap_parkflush;
+
+    longint acc_cycle, acc_instr, acc_stall, acc_flush;
+    longint acc_parkflush;
+    int     snap_ok, snap_missing;
+
+    // Flush attribution by the instruction type sitting in EX.
+    longint acc_fl_jal, acc_fl_jalr, acc_fl_br;
+
+    // SAMPLING DISCIPLINE. The RTL counters are always_ff: they sample
+    // control_flush as it stands JUST BEFORE a rising edge. A testbench
+    // read taken after the edge would instead see the combinational value
+    // belonging to the NEXT cycle, which mis-attributes every flush by one
+    // cycle. These three signals are therefore latched on the preceding
+    // falling edge, exactly as the counter sees them.
+    logic        pre_flush;
+    logic [31:0] pre_id_ex_pc;
+    logic        pre_jal, pre_jalr;
+
+    always @(negedge clk) begin
+        pre_flush    = dut.control_flush;
+        pre_id_ex_pc = dut.id_ex_pc;
+        pre_jal      = dut.id_ex_jal;
+        pre_jalr     = dut.id_ex_jalr;
+    end
+
+    always @(posedge clk) begin
+        #1;
+        if (!reset && snap_arm && !snapped) begin
+            if (pre_flush) begin
+                if (int'(pre_id_ex_pc) == park * 4) snap_parkflush++;
+                else if (pre_jal)                   acc_fl_jal++;
+                else if (pre_jalr)                  acc_fl_jalr++;
+                else                                acc_fl_br++;
+            end
+
+            if (snap_target > 0 && dut.instret_count == snap_target) begin
+                snapped    = 1'b1;
+                snap_cycle = dut.cycle_count;
+                snap_instr = dut.instret_count;
+                snap_stall = dut.stall_count;
+                snap_flush = dut.flush_count;
+            end
+        end
+    end
 
     task automatic run_one(input int unsigned seed, input int phase, input int len);
         int cycles;
@@ -607,7 +684,11 @@ module tb_cpu_random_check;
         for (int i = 0; i < 256; i++) dut.imem_inst.memory[i] = prog[i];
         repeat (2) @(posedge clk);
         @(negedge clk);
-        reset = 1'b0;
+        snapped        = 1'b0;
+        snap_target    = ref_steps;
+        snap_parkflush = 0;
+        snap_arm       = 1'b1;
+        reset          = 1'b0;
 
         cycles = 4 * ref_steps + 80;
         repeat (cycles) @(posedge clk);
@@ -626,6 +707,21 @@ module tb_cpu_random_check;
                                   i, ref_mem[i], dut.dmem_inst.memory[i]);
                 mismatch = 1;
             end
+        end
+
+        snap_arm = 1'b0;
+        if (snapped) begin
+            snap_ok++;
+            acc_cycle     += snap_cycle;
+            acc_instr     += snap_instr;
+            acc_stall     += snap_stall;
+            acc_flush     += snap_flush;
+            acc_parkflush += snap_parkflush;
+        end
+        else begin
+            snap_missing++;
+            $display("COUNTER-SNAP MISSING: seed=%0d phase=%0d len=%0d -- the DUT never retired %0d instructions",
+                     seed, phase, len, ref_steps);
         end
 
         total_progs++;
@@ -708,6 +804,39 @@ module tb_cpu_random_check;
                  cnt_loop, progs_with_loops, total_back_taken);
         for (int i = 0; i < ((total_fails < 32) ? total_fails : 32); i++)
             $display("repro[%0d]: seed=%0d phase=%0d len=%0d", i, fail_seeds[i], fail_phases[i], fail_lens[i]);
+        $display("==== DUT performance-counter aggregate ====");
+        $display("snapshots taken    : %0d of %0d programs (missing=%0d)",
+                 snap_ok, total_progs, snap_missing);
+        $display("DUT cycle_count    : %0d", acc_cycle);
+        $display("DUT instret_count  : %0d", acc_instr);
+        $display("DUT stall_count    : %0d", acc_stall);
+        $display("DUT flush_count    : %0d (raw, includes one park flush per program)", acc_flush);
+        $display("park flushes in win: %0d", acc_parkflush);
+        $display("DUT program flushes: %0d (raw minus park)", acc_flush - acc_parkflush);
+        $display("REF retired instrs : %0d", total_instrs);
+        $display("REF flush transfers: %0d", total_flushes);
+        $display("DUT flush by type  : jal=%0d jalr=%0d taken-br=%0d  (sum=%0d)",
+                 acc_fl_jal, acc_fl_jalr, acc_fl_br,
+                 acc_fl_jal + acc_fl_jalr + acc_fl_br);
+        $display("REF flush by type  : jal=%0d jalr=%0d taken-br=%0d  (sum=%0d)",
+                 r_jal_exec, r_jalr_exec, total_taken,
+                 r_jal_exec + r_jalr_exec + total_taken);
+        // Cycle identity. Two lost cycles per redirect only land inside the
+        // window if both killed entries reach write-back before the window
+        // closes. For the final control transfer of a program - the one
+        // that jumps to the park - they do not, so those redirects are
+        // counted by flush_count but cost no measured cycles. The residual
+        // below is that set, and it must equal the number of programs whose
+        // park flush also fell outside the window.
+        $display("cycle identity     : cycles=%0d  4*progs+retired+stalls=%0d  residual=%0d  => effective redirects=%0d",
+                 acc_cycle, 4*snap_ok + acc_instr + acc_stall,
+                 acc_cycle - (4*snap_ok + acc_instr + acc_stall),
+                 (acc_cycle - (4*snap_ok + acc_instr + acc_stall)) / 2);
+        $display("trailing transfers : %0d (program flushes) - %0d (effective) = %0d ; programs with no park flush in window = %0d",
+                 acc_flush - acc_parkflush,
+                 (acc_cycle - (4*snap_ok + acc_instr + acc_stall)) / 2,
+                 (acc_flush - acc_parkflush) - ((acc_cycle - (4*snap_ok + acc_instr + acc_stall)) / 2),
+                 snap_ok - acc_parkflush);
         if (total_fails == 0) $display("CPU_RANDOM_TB: ALL PASS");
         else                  $display("CPU_RANDOM_TB: FAILED");
         $finish;
