@@ -92,8 +92,8 @@ Deliberately **not** implemented. These are scope boundaries, not known bugs:
 - **No misaligned access handling.** Behaviour on a misaligned load/store is undefined; the random
   generator excludes such accesses by construction.
 - **No M/A/F/D extensions.**
-- **No caches, no branch prediction** — branches are always taken as not-taken until resolved in EX,
-  costing two cycles per taken branch.
+- **No caches, no branch prediction** — branches are always predicted not-taken until resolved in
+  EX, costing two cycles per taken branch.
 - **Memories are on-chip arrays** initialised in RTL, not external interfaces.
 - **Not a board-level design.** There is no top-level wrapper with pin assignments; see
   [Synthesis and timing](#synthesis-and-timing).
@@ -139,9 +139,21 @@ flushed instructions cannot be mistaken for retired ones.
 |---|---|
 | Programs | **1,440** |
 | Architectural instructions executed | **41,846** |
+| DUT cycles | **58,734** |
+| **Aggregate CPI across the campaign** | **1.40** |
 | Backward-taken branches | **3,379** |
 | Reference-model mismatches | **0** |
 | Non-terminating / skipped programs | **0** |
+
+The aggregate CPI is 58,734 cycles ÷ 41,846 retired instructions, from the DUT's own counters
+summed over the four seed runs. `tb_cpu_random_check` prints its per-seed cycles, retirements and
+CPI in the `DUT performance-counter aggregate` block, and `./run_all.sh --random` collects all four.
+
+One caveat worth stating, because it is easy to check and would otherwise look like an oversight:
+the campaign is 1,440 *separate short programs*, each paying four pipeline-fill cycles, so about
+5,760 cycles — roughly 0.14 of that 1.40 — are fill rather than steady-state execution. The figure
+is the right one for "what did this workload actually cost", but it is not a steady-state CPI, and
+it is not comparable to a benchmark run as one long program.
 
 ### Backward branches and loops
 
@@ -184,9 +196,16 @@ Every workload satisfies `cycles = 4 + retired + stalls + 2 × flushes` exactly 
 cycles, one cycle per commit, one per stall, two discarded per redirect. The model is compared
 against hardware in the testbench, so the model is under test too.
 
-The same counters were run across the full 1,440-program random campaign. The DUT's flush count
-matched the reference model's count of executed control transfers **exactly** — 4,710 against 4,710,
-and exactly per type (132 `JAL`, 66 `JALR`, 955 taken branches on the lead seed).
+The same counters were run across the full 1,440-program random campaign, which retired 41,846
+instructions in 58,734 cycles for an **aggregate CPI of 1.40** — see
+[the campaign table](#randomized-verification-against-a-reference-model) for how that divides and
+what it does and does not mean. The DUT's flush count matched the reference model's count of
+executed control transfers **exactly** — 4,710 against 4,710, and exactly per type (132 `JAL`,
+66 `JALR`, 955 taken branches on the lead seed).
+
+Note the six workloads above are hand-written microbenchmarks that isolate one effect each, so
+their CPIs (1.02 to 3.02) bracket the design rather than describe a realistic instruction mix. The
+campaign's 1.40 is the closest thing here to a mixed-workload number.
 
 ---
 
@@ -247,11 +266,42 @@ riscv/riscv.srcs/
     perf/                 counter validation + CPI workloads
 riscv_cpu/riscv_cpu.srcs/
   sources_1/new/          riscv_cpu.sv   (pipeline top)
+run_all.sh                compile + run every suite, print a pass/fail summary
 ```
 
 ## Running the simulations
 
-Requires Vivado's simulator (`xvlog` / `xelab`) on `PATH`. From a scratch directory:
+```sh
+./run_all.sh            # all 11 self-checking suites, with a pass/fail summary
+./run_all.sh --random   # the above plus the 4-seed random campaign
+./run_all.sh --only tb_cpu_loop_check
+```
+
+It exits non-zero if any suite fails, and writes per-suite logs to `build/`. The verdict comes from
+each suite's own `ALL PASS` banner rather than the simulator's exit status, because `xvlog`/`xelab`
+exit 0 even when the testbench itself reported errors. With `--random` it also prints each seed's
+cycle and retirement counters and its CPI.
+
+### Simulator requirement
+
+**You need Vivado's simulator (`xvlog` / `xelab`) on `PATH`. Verilator and Icarus will not work
+here**, and that is a real limitation rather than an untested guess:
+
+- The CPU-level testbenches read DUT internals hierarchically — `dut.regfile_inst.registers[i]`,
+  `dut.dmem_inst.memory[i]`, `dut.instret_count`. Verilator optimises those away unless each one is
+  explicitly marked public, so the testbenches would need annotating or rewriting.
+- The 14 assertions are concurrent SVA attached with `bind`. Icarus does not support concurrent
+  assertions at all.
+- The testbenches are self-contained SystemVerilog with their own clock generation and timing
+  controls, not a C++ harness, so Verilator would need a wrapper written for each.
+
+Porting to an open-source flow is worth doing — it is the main thing standing between this repo and
+anyone being able to reproduce the numbers without a Xilinx licence — but it is not done, and the
+synthesis and timing figures would still need Vivado regardless.
+
+### Running a single suite by hand
+
+From a scratch directory:
 
 ```sh
 # 1. compile RTL + the suite you want (order matters: RTL first)
@@ -276,6 +326,33 @@ Swap the last source file and the top name for any other suite:
 | Counter validation | `tb_perf_counter_check` |
 | CPI workloads | `tb_cpu_cpi_bench` |
 
-The randomized suite defaults to seed `20260919`; other seeds are reproduced by changing
-`base_seed` in `tb_cpu_random_check.sv`. Each suite prints a per-check `PASS`/`FAIL` log and ends
-with a `<NAME>_TB: ALL PASS` banner.
+For `tb_branch_unit_check`, `tb_control_unit_check` and `tb_data_memory_subword_check`, drop the SVA
+source and the `riscv_cpu_sva_bind` top — those three are unit-level and never instantiate the CPU,
+so the bind has nothing to attach to. `run_all.sh` already makes that distinction.
+
+The randomized suite defaults to seed `20260919`. Other seeds need no source edit:
+
+```sh
+xelab tb_cpu_random_check riscv_cpu_sva_bind -s run --relax -R -testplusarg BASE_SEED=12345
+```
+
+A single failing program is reproduced on its own from the `repro:` line the suite prints, via
+`-testplusarg ONLY_SEED=… ONLY_PHASE=… ONLY_LEN=…`.
+
+Each suite prints a per-check `PASS`/`FAIL` log and ends with a `<NAME>_TB: ALL PASS` banner.
+
+---
+
+## Next steps
+
+This core is finished as a standalone exercise; the work continues on the question it raises, which
+is what a pipeline like this costs once it has to share a system with other blocks.
+
+- **[xheep-powergate-timing](https://github.com/sruthi-2804/xheep-powergate-timing)** — measuring CPU
+  power-gating wake-up latency and off-time in [X-HEEP](https://github.com/esl-epfl/x-heep) from RTL
+  waveforms, and the break-even idle length that follows. Same instinct as the counters here: get the
+  cycle-level number out of the hardware rather than estimating it.
+- **Accelerator coupling** — comparing a tightly-coupled coprocessor against a bus-attached
+  accelerator on this kind of core, where the interesting cost is the handoff rather than the compute.
+  The critical path measured above (branch resolve in EX through the forwarding mux) is exactly what a
+  coprocessor interface would have to avoid lengthening.

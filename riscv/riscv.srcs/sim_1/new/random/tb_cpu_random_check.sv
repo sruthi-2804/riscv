@@ -809,6 +809,12 @@ module tb_cpu_random_check;
                  snap_ok, total_progs, snap_missing);
         $display("DUT cycle_count    : %0d", acc_cycle);
         $display("DUT instret_count  : %0d", acc_instr);
+        // Printed rather than left to be divided by hand. Note this is the CPI
+        // for THIS seed only; the campaign figure quoted in the README is the
+        // sum of these two counters over all four seed runs, then divided.
+        if (acc_instr > 0)
+            $display("DUT aggregate CPI  : %0.4f (%0d cycles / %0d retired)",
+                     real'(acc_cycle) / real'(acc_instr), acc_cycle, acc_instr);
         $display("DUT stall_count    : %0d", acc_stall);
         $display("DUT flush_count    : %0d (raw, includes one park flush per program)", acc_flush);
         $display("park flushes in win: %0d", acc_parkflush);
